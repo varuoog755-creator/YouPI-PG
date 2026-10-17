@@ -46,7 +46,10 @@ export class AdminServer {
    * @param {number} fallbackPort        Port used when baseUrl is missing/invalid
    */
   resolveUpstream(baseUrl, fallbackPort) {
-    const raw = String(baseUrl || '').trim() || `http://127.0.0.1:${fallbackPort}`;
+    let raw = String(baseUrl || '').trim();
+    // Allow a bare hostname (no scheme), e.g. platform-injected host values.
+    if (raw && !/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
+    raw = raw || `http://127.0.0.1:${fallbackPort}`;
     let parsed;
     try {
       parsed = new URL(raw);
