@@ -55,7 +55,7 @@ export class GmailObserverServer {
       // GET /oauth/url
       if (pathname === '/oauth/url') {
         let clientId = '';
-        const apiBase = (this.poller.apiBaseUrl && !this.poller.apiBaseUrl.includes('gauravtesting.online')) ? this.poller.apiBaseUrl : `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`;
+        const apiBase = this.poller.apiBaseUrl || `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`;
         try {
           const credRes = await fetch(`${apiBase}/api/v1/admin/gmail/credentials`);
           if (credRes.ok) {
@@ -102,7 +102,7 @@ export class GmailObserverServer {
         try {
           let clientId = '';
           let clientSecret = '';
-          const apiBase = (this.poller.apiBaseUrl && !this.poller.apiBaseUrl.includes('gauravtesting.online')) ? this.poller.apiBaseUrl : `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`;
+          const apiBase = this.poller.apiBaseUrl || `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`;
 
           try {
             const credRes = await fetch(`${apiBase}/api/v1/admin/gmail/credentials`);

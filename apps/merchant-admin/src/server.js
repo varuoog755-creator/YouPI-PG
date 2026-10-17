@@ -1,4 +1,6 @@
 import http from 'node:http';
+import https from 'node:https';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +35,56 @@ export class AdminServer {
     this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
   }
 
+  /**
+   * Resolve an upstream target for reverse proxying.
+   *
+   * Supports both deployment topologies:
+   *  - Single host (all services on one machine): http://localhost:6100
+   *  - Split hosts (Render / container platforms): https://service.onrender.com
+   *
+   * @param {string|undefined} baseUrl   Upstream base URL (may be undefined)
+   * @param {number} fallbackPort        Port used when baseUrl is missing/invalid
+   */
+  resolveUpstream(baseUrl, fallbackPort) {
+    const raw = String(baseUrl || '').trim() || `http://127.0.0.1:${fallbackPort}`;
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      parsed = new URL(`http://127.0.0.1:${fallbackPort}`);
+    }
+    const isHttps = parsed.protocol === 'https:';
+    const port = parsed.port ? Number(parsed.port) : (isHttps ? 443 : 80);
+    return {
+      client: isHttps ? https : http,
+      isHttps,
+      hostname: parsed.hostname,
+      port,
+      hostHeader: parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname,
+    };
+  }
+
+  /**
+   * Build the header set forwarded to an upstream service.
+   * Strips hop-by-hop headers that must not be relayed across hosts.
+   */
+  buildProxyHeaders(incoming, target, extra = {}) {
+    const {
+      connection, keepAlive,
+      'proxy-authenticate': _proxyAuthenticate,
+      'proxy-authorization': _proxyAuthorization,
+      te, trailer, transferEncoding, upgrade, 'transfer-encoding': _transferEncoding,
+      ...forwardable
+    } = incoming;
+    return {
+      ...forwardable,
+      ...extra,
+      host: target.hostHeader,
+      'x-forwarded-host': incoming.host || '',
+      'x-forwarded-proto': incoming['x-forwarded-proto'] || (target.isHttps ? 'https' : 'http')
+    };
+  }
+
   renderHtml() {
     try {
       this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
@@ -47,10 +99,61 @@ export class AdminServer {
     return html;
   }
 
+  /**
+   * Optional HTTP Basic Auth gate for the merchant admin surface.
+   *
+   * The admin UI and its /api/* proxy expose privileged payment operations, so
+   * a public deployment (Render, Fly, a VPS behind a domain) must not leave them
+   * open. Enable it by setting ADMIN_BASIC_AUTH_USER and ADMIN_BASIC_AUTH_PASS.
+   * When unset the server stays open, which preserves the local single-host flow.
+   *
+   * @returns {{ ok: true } | { ok: false }} Result of the credential check
+   */
+  checkBasicAuth(req) {
+    const expectedUser = process.env.ADMIN_BASIC_AUTH_USER;
+    const expectedPass = process.env.ADMIN_BASIC_AUTH_PASS;
+    if (!expectedUser || !expectedPass) return { ok: true };
+
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Basic ')) return { ok: false };
+
+    let decoded = '';
+    try {
+      decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    } catch {
+      return { ok: false };
+    }
+
+    const sep = decoded.indexOf(':');
+    if (sep < 0) return { ok: false };
+    const user = decoded.slice(0, sep);
+    const pass = decoded.slice(sep + 1);
+
+    const a = Buffer.from(user);
+    const b = Buffer.from(expectedUser);
+    const userOk = a.length === b.length && crypto.timingSafeEqual(a, b);
+
+    const c = Buffer.from(pass);
+    const d = Buffer.from(expectedPass);
+    const passOk = c.length === d.length && crypto.timingSafeEqual(c, d);
+
+    return { ok: userOk && passOk };
+  }
+
   createServer() {
     return http.createServer(async (req, res) => {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
+
+      // Keep the health probe open so orchestrators can check liveness.
+      if (pathname !== '/health' && !this.checkBasicAuth(req).ok) {
+        res.writeHead(401, {
+          'WWW-Authenticate': 'Basic realm="YOUPI Merchant Admin", charset="UTF-8"',
+          'Content-Type': 'application/json'
+        });
+        res.end(JSON.stringify({ error: 'Unauthorized', message: 'Merchant admin requires authentication.' }));
+        return;
+      }
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204, {
@@ -83,18 +186,16 @@ export class AdminServer {
         return;
       }
 
-      // Merged Control Center Supervisor Proxy: /api/services/* and /api/logs/stream -> Control Center on port 8090
+      // Merged Control Center Supervisor Proxy: /api/services/* and /api/logs/stream -> Control Center
+      // Works both single-host (localhost:8090) and split-host (BASE_CONTROL_CENTER_URL).
       if (pathname.startsWith('/api/services') || pathname === '/api/logs/stream') {
-        const ccPort = Number(process.env.CONTROL_CENTER_PORT || 8090);
-        const proxyReq = http.request({
-          hostname: '127.0.0.1',
-          port: ccPort,
+        const cc = this.resolveUpstream(process.env.BASE_CONTROL_CENTER_URL, Number(process.env.CONTROL_CENTER_PORT || 8090));
+        const proxyReq = cc.client.request({
+          hostname: cc.hostname,
+          port: cc.port,
           path: req.url,
           method: req.method,
-          headers: {
-            ...req.headers,
-            host: `localhost:${ccPort}`
-          }
+          headers: this.buildProxyHeaders(req.headers, cc)
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);
@@ -114,21 +215,19 @@ export class AdminServer {
 
       // Transparent API Proxy: /api/* -> Payment Core REST API
       if (pathname.startsWith('/api/')) {
-        const targetPort = Number(process.env.PAYMENT_API_PORT || 6100);
+        // Resolve from BASE_PAYMENT_API_URL so this works when the payment API
+        // runs on a different host (e.g. Render) instead of localhost.
+        const target = this.resolveUpstream(this.apiBaseUrl, Number(process.env.PAYMENT_API_PORT || 6100));
         const defaultMerchant = this.merchantRepo.getDefault ? this.merchantRepo.getDefault() : (this.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || this.merchantRepo.findAll()[0]);
         const defaultMerchantId = defaultMerchant?.id || '00000000-0000-0000-0000-000000000001';
-        const proxyReq = http.request({
-          hostname: '127.0.0.1',
-          port: targetPort,
+        const proxyReq = target.client.request({
+          hostname: target.hostname,
+          port: target.port,
           path: req.url,
           method: req.method,
-          headers: {
-            ...req.headers,
-            'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
-            host: `localhost:${targetPort}`,
-            'x-forwarded-host': req.headers.host || '',
-            'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
-          }
+          headers: this.buildProxyHeaders(req.headers, target, {
+            'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId
+          })
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);

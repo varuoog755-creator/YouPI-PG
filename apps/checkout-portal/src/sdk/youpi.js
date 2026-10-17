@@ -38,7 +38,9 @@
       scriptUrl = new URL(script.src, window.location.href);
     } catch (e) { }
 
-    const origin = scriptUrl ? scriptUrl.origin : (window.location.protocol + '//' + window.location.hostname + ':7000');
+    // Fall back to the page origin rather than assuming port 7000, which is not
+    // exposed on hosted platforms (Render, Fly, etc. route a single public port).
+    const origin = scriptUrl ? scriptUrl.origin : window.location.origin;
 
     return {
       key: script.getAttribute('data-youpi-key') || script.getAttribute('data-key') || script.getAttribute('data-merchant-id') || '',
@@ -94,12 +96,12 @@
      */
     constructor(options = {}) {
       const defaultPortal = isBrowser
-        ? (scriptConfig.portalUrl || (window.location.protocol + '//' + window.location.hostname + ':7000'))
-        : 'http://localhost:7000';
+        ? (scriptConfig.portalUrl || window.location.origin)
+        : (process.env.BASE_CHECKOUT_URL || 'http://localhost:7000');
 
       const defaultApi = isBrowser
         ? (scriptConfig.apiUrl || defaultPortal)
-        : 'http://localhost:6100';
+        : (process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100');
 
       this.options = Object.assign({
         key: scriptConfig.key || '',

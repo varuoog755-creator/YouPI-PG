@@ -1,0 +1,113 @@
+# YOUPI PG — Render deployment blueprint
+#
+# One-click deploy: Render dashboard -> New + -> Blueprint -> pick this repo.
+#
+# Notes
+#  - Every service is a separate Render web service, so each app needs the
+#    *_URL variables below to reach the others. This is what the proxy fixes in
+#    this fork address: previously the /api/* proxies were hardcoded to
+#    127.0.0.1:<port>, which only works when all services share one host.
+#  - Build command is intentionally just `npm install`. These apps have no
+#    `build` script, and Render's auto-detected "npm install; npm run build"
+#    fails with: npm error Missing script: "build".
+#  - Render assigns the public port automatically; the apps' *_PORT vars only
+#    matter for single-host/local runs.
+#
+# Persistent data
+#  SQLite lives on the container filesystem, so it resets on every deploy and
+#  the free tier has no persistent disk. To persist, mount a Render Disk at
+#  /var/data (paid plans) and set SQLITE_DB_PATH=/var/data/youpi_pg.sqlite
+#  on every service below.
+
+services:
+  - type: web
+    name: youpi-payment-api
+    runtime: node
+    plan: free
+    rootDir: apps/payment-api
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: USE_SQLITE_FALLBACK
+        value: "true"
+      - key: BASE_CHECKOUT_URL
+        sync: false # set to https://youpi-checkout.onrender.com
+      - key: BASE_ADMIN_URL
+        sync: false # set to https://youpi-merchant-admin.onrender.com
+      - key: BASE_DEMO_STORE_URL
+        sync: false # set to https://youpi-showcase-store.onrender.com
+      - key: ANDROID_ENROLLMENT_SECRET
+        generateValue: true
+      - key: YOUPI_WEBHOOK_SECRET
+        generateValue: true
+      # SQLite on a Render Disk (paid plans): /var/data/youpi_pg.sqlite
+      - key: SQLITE_DB_PATH
+        sync: false
+
+  - type: web
+    name: youpi-checkout
+    runtime: node
+    plan: free
+    rootDir: apps/checkout-portal
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: USE_SQLITE_FALLBACK
+        value: "true"
+      - key: BASE_PAYMENT_API_URL
+        sync: false # set to https://youpi-payment-api.onrender.com
+      - key: SQLITE_DB_PATH
+        sync: false
+
+  - type: web
+    name: youpi-merchant-admin
+    runtime: node
+    plan: free
+    rootDir: apps/merchant-admin
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: USE_SQLITE_FALLBACK
+        value: "true"
+      - key: BASE_PAYMENT_API_URL
+        sync: false # set to https://youpi-payment-api.onrender.com
+      - key: BASE_CHECKOUT_URL
+        sync: false # set to https://youpi-checkout.onrender.com
+      # Optional: leave empty to disable. When set, the admin UI and its
+      # privileged /api/* proxy require these credentials. Public deployments
+      # should always set them.
+      - key: ADMIN_BASIC_AUTH_USER
+        sync: false
+      - key: ADMIN_BASIC_AUTH_PASS
+        generateValue: true
+      - key: SQLITE_DB_PATH
+        sync: false
+
+  - type: web
+    name: youpi-showcase-store
+    runtime: node
+    plan: free
+    rootDir: apps/coin-wallet-store
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: USE_SQLITE_FALLBACK
+        value: "true"
+      - key: BASE_PAYMENT_API_URL
+        sync: false # set to https://youpi-payment-api.onrender.com
+      - key: BASE_CHECKOUT_URL
+        sync: false # set to https://youpi-checkout.onrender.com
+      - key: SQLITE_DB_PATH
+        sync: false

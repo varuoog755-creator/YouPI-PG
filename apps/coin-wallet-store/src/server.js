@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +28,15 @@ export class CoinWalletStoreServer {
    */
   constructor(options = {}) {
     const internalPort = process.env.PAYMENT_API_PORT || 6100;
-    this.gatewayApiUrl = options.gatewayApiUrl || process.env.PAYMENT_API_INTERNAL_URL || `http://127.0.0.1:${internalPort}`;
+    // Prefer the public/shared payment API URL when running split-host, and fall
+    // back to the same-host loopback address for local/single-host runs.
+    this.gatewayApiUrl = options.gatewayApiUrl
+      || process.env.PAYMENT_API_INTERNAL_URL
+      || process.env.BASE_PAYMENT_API_URL
+      || `http://127.0.0.1:${internalPort}`;
+    this.checkoutBaseUrl = options.checkoutBaseUrl
+      || process.env.BASE_CHECKOUT_URL
+      || `http://127.0.0.1:${process.env.CHECKOUT_PORT || process.env.CHECKOUT_PORTAL_PORT || 7000}`;
     this.merchantId = options.merchantId || '00000000-0000-0000-0000-000000000001';
     this.webhookSecret = options.webhookSecret || 'merchant_webhook_secret_for_wallet_store';
 
@@ -48,6 +57,46 @@ export class CoinWalletStoreServer {
     this.orderSuspiciousHtml = fs.readFileSync(path.join(__dirname, 'order-suspicious.html'), 'utf8');
     this.orderExpiredHtml = fs.readFileSync(path.join(__dirname, 'order-expired.html'), 'utf8');
     this.orderCancelledHtml = fs.readFileSync(path.join(__dirname, 'order-cancelled.html'), 'utf8');
+  }
+
+  /**
+   * Resolve an upstream target so reverse proxying works both on a single host
+   * (localhost ports) and across hosts (public HTTPS URLs).
+   */
+  resolveUpstream(baseUrl, fallbackPort) {
+    const raw = String(baseUrl || '').trim() || `http://127.0.0.1:${fallbackPort}`;
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      parsed = new URL(`http://127.0.0.1:${fallbackPort}`);
+    }
+    const isHttps = parsed.protocol === 'https:';
+    const port = parsed.port ? Number(parsed.port) : (isHttps ? 443 : 80);
+    return {
+      client: isHttps ? https : http,
+      isHttps,
+      hostname: parsed.hostname,
+      port,
+      hostHeader: parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname,
+    };
+  }
+
+  buildProxyHeaders(incoming, target, extra = {}) {
+    const {
+      connection, keepAlive,
+      'proxy-authenticate': _proxyAuthenticate,
+      'proxy-authorization': _proxyAuthorization,
+      te, trailer, transferEncoding, upgrade, 'transfer-encoding': _transferEncoding,
+      ...forwardable
+    } = incoming;
+    return {
+      ...forwardable,
+      ...extra,
+      host: target.hostHeader,
+      'x-forwarded-host': incoming.host || '',
+      'x-forwarded-proto': incoming['x-forwarded-proto'] || (target.isHttps ? 'https' : 'http')
+    };
   }
 
   creditCoins(orderId, coins, packName) {
@@ -129,20 +178,16 @@ export class CoinWalletStoreServer {
         }
       }
 
-      // REVERSE PROXY: /checkout/* and /icons/* -> Checkout Portal (Port 7000)
+      // REVERSE PROXY: /checkout/* and /icons/* -> Checkout Portal
+      // Uses BASE_CHECKOUT_URL so it works when the portal is on another host.
       if (pathname.startsWith('/checkout') || pathname.startsWith('/icons/')) {
-        const portalPort = Number(process.env.CHECKOUT_PORT || 7000);
-        const proxyReq = http.request({
-          hostname: '127.0.0.1',
-          port: portalPort,
+        const portal = this.resolveUpstream(this.checkoutBaseUrl, Number(process.env.CHECKOUT_PORT || process.env.CHECKOUT_PORTAL_PORT || 7000));
+        const proxyReq = portal.client.request({
+          hostname: portal.hostname,
+          port: portal.port,
           path: req.url,
           method: req.method,
-          headers: {
-            ...req.headers,
-            host: `localhost:${portalPort}`,
-            'x-forwarded-host': req.headers.host || '',
-            'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
-          }
+          headers: this.buildProxyHeaders(req.headers, portal)
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);
@@ -159,21 +204,17 @@ export class CoinWalletStoreServer {
         return;
       }
 
-      // REVERSE PROXY: /api/v1/* -> Payment API (Port 6100 / gatewayApiUrl)
+      // REVERSE PROXY: /api/v1/* -> Payment API (gatewayApiUrl)
       if (pathname.startsWith('/api/v1/')) {
         try {
-          const parsedGateway = new URL(this.gatewayApiUrl);
-          const proxyReq = http.request({
-            hostname: parsedGateway.hostname || '127.0.0.1',
-            port: Number(parsedGateway.port || process.env.PAYMENT_API_PORT || 6100),
+          // Supports both http and https upstreams (Render exposes HTTPS).
+          const target = this.resolveUpstream(this.gatewayApiUrl, Number(process.env.PAYMENT_API_PORT || 6100));
+          const proxyReq = target.client.request({
+            hostname: target.hostname,
+            port: target.port,
             path: req.url,
             method: req.method,
-            headers: {
-              ...req.headers,
-              host: `${parsedGateway.hostname}:${parsedGateway.port}`,
-              'x-forwarded-host': req.headers.host || '',
-              'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
-            }
+            headers: this.buildProxyHeaders(req.headers, target)
           }, (proxyRes) => {
             res.writeHead(proxyRes.statusCode, proxyRes.headers);
             proxyRes.pipe(res);

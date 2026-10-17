@@ -1513,9 +1513,13 @@ export function registerAdminRoutes(server, ctx) {
       }
     }
 
-    // Stop poller in observer service
+    // Stop poller in observer service.
+    // Uses GMAIL_OBSERVER_URL when the observer runs as a separate service,
+    // otherwise falls back to the single-host loopback address.
     try {
-      await fetch(`http://127.0.0.1:${process.env.GMAIL_OBSERVER_PORT || 6003}/stop`, { method: 'POST' }).catch(() => {});
+      const gmailBase = String(process.env.GMAIL_OBSERVER_URL || '').trim()
+        || `http://127.0.0.1:${process.env.GMAIL_OBSERVER_PORT || 6003}`;
+      await fetch(`${gmailBase}/stop`, { method: 'POST' }).catch(() => {});
     } catch {}
 
     HttpServer.json(res, 200, {

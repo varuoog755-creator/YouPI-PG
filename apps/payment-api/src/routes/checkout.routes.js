@@ -3,6 +3,25 @@ import { toRupeesString, buildUpiUri, PaymentStatus, PaymentMethod, UPI_PROVIDER
 import { validateSessionDeviceAccess } from '@youpi/core';
 
 /**
+ * Resolve an observer service base URL.
+ *
+ * Observers (SMS / Gmail / help-portal) may run on the same host or as separate
+ * services. Prefer an explicit *_URL so split-host deployments work, and fall
+ * back to the loopback port used by the single-host topology.
+ *
+ * @param {string|undefined} explicitUrl  e.g. process.env.SMS_OBSERVER_URL
+ * @param {number} fallbackPort
+ */
+function resolveObserverBase(explicitUrl, fallbackPort) {
+  const raw = String(explicitUrl || '').trim() || `http://127.0.0.1:${fallbackPort}`;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return `http://127.0.0.1:${fallbackPort}`;
+  }
+}
+
+/**
  * Validates device access to an active payment session.
  * Enforces:
  * 1. If session has no device binding yet, binds to requesting device if provided.
@@ -176,8 +195,8 @@ async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode = 'OFF
 
   if (!smsHealthy) {
     try {
-      const smsPort = Number(process.env.SMS_OBSERVER_PORT || 6002);
-      const res = await fetch(`http://127.0.0.1:${smsPort}/api/browser/status`, { signal: AbortSignal.timeout(800) });
+      const smsBase = resolveObserverBase(process.env.SMS_OBSERVER_URL, Number(process.env.SMS_OBSERVER_PORT || 6002));
+      const res = await fetch(`${smsBase}/api/browser/status`, { signal: AbortSignal.timeout(800) });
       if (res.ok) {
         const data = await res.json();
         const isRecent = data.lastSeenAt && (Date.now() - new Date(data.lastSeenAt).getTime() < 300000);
@@ -198,10 +217,10 @@ async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode = 'OFF
 
     if (hasRefreshToken || hasApiKey) {
       let pollerActive = false;
-      const gmailPort = Number(process.env.GMAIL_OBSERVER_PORT || 6003);
+      const gmailBase = resolveObserverBase(process.env.GMAIL_OBSERVER_URL, Number(process.env.GMAIL_OBSERVER_PORT || 6003));
 
       try {
-        const res = await fetch(`http://127.0.0.1:${gmailPort}/health`, { signal: AbortSignal.timeout(800) });
+        const res = await fetch(`${gmailBase}/health`, { signal: AbortSignal.timeout(800) });
         if (res.ok) {
           const data = await res.json();
           if (data.status === 'UP') {
@@ -212,7 +231,7 @@ async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode = 'OFF
 
       if (!pollerActive) {
         try {
-          const res = await fetch(`http://127.0.0.1:${gmailPort}/api/browser/status`, { signal: AbortSignal.timeout(800) });
+          const res = await fetch(`${gmailBase}/api/browser/status`, { signal: AbortSignal.timeout(800) });
           if (res.ok) {
             const data = await res.json();
             if (data.isLoggedIn || data.status === 'CONNECTED' || data.isPolling) {
@@ -244,7 +263,7 @@ async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode = 'OFF
       // Check if browser-based Gmail automator is actively logged in
       try {
         const gmailPort = Number(process.env.GMAIL_OBSERVER_PORT || 6003);
-        const res = await fetch(`http://127.0.0.1:${gmailPort}/api/browser/status`, { signal: AbortSignal.timeout(800) });
+        const res = await fetch(`${gmailBase}/api/browser/status`, { signal: AbortSignal.timeout(800) });
         if (res.ok) {
           const data = await res.json();
           if (data.isLoggedIn === true && data.status === 'CONNECTED') {
