@@ -2,14 +2,16 @@
 #
 # One-click deploy: Render dashboard -> New + -> Blueprint -> pick this repo.
 #
-# Cross-service URLs use `fromService: host`, so Render injects each service's
-# real hostname at deploy time. That matters because a service only gets the
-# clean "name.onrender.com" subdomain when nothing else holds it — otherwise
-# Render appends a random suffix. Hardcoding the URLs here would break on the
-# next redeploy, so let Render resolve them instead.
+# Cross-service URLs are written out explicitly. `fromService: host` was tried
+# first, but Render resolved it to the service *name* rather than its public
+# hostname, so the proxies got e.g. "youpi-payment-api" and failed DNS with
+# getaddrinfo ENOTFOUND.
 #
-# The service code accepts a bare hostname without a scheme and assumes https,
-# which is what `fromService: host` provides.
+# These hostnames are stable as long as the service names below are unchanged
+# and nothing else claims the clean subdomain. If you rename a service or
+# another service takes its name, update the matching URLs here.
+#
+# The service code accepts a bare hostname with no scheme and assumes https.
 #
 # Build command is intentionally just `npm install`. These apps have no `build`
 # script, and Render's auto-detected "npm install; npm run build" fails with:
@@ -46,20 +48,11 @@ services:
       - key: NODE_ENV
         value: production
       - key: BASE_CHECKOUT_URL
-        fromService:
-          type: web
-          name: youpi-checkout
-          property: host
+        value: https://youpi-checkout.onrender.com
       - key: BASE_ADMIN_URL
-        fromService:
-          type: web
-          name: youpi-merchant-admin
-          property: host
+        value: https://youpi-merchant-admin.onrender.com
       - key: BASE_DEMO_STORE_URL
-        fromService:
-          type: web
-          name: youpi-showcase-store
-          property: host
+        value: https://youpi-showcase-store.onrender.com
       - key: ANDROID_ENROLLMENT_SECRET
         generateValue: true
       - key: YOUPI_WEBHOOK_SECRET
@@ -77,10 +70,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: BASE_PAYMENT_API_URL
-        fromService:
-          type: web
-          name: youpi-payment-api
-          property: host
+        value: https://youpi-payment-api.onrender.com
 
   - type: web
     name: youpi-merchant-admin
@@ -94,15 +84,9 @@ services:
       - key: NODE_ENV
         value: production
       - key: BASE_PAYMENT_API_URL
-        fromService:
-          type: web
-          name: youpi-payment-api
-          property: host
+        value: https://youpi-payment-api.onrender.com
       - key: BASE_CHECKOUT_URL
-        fromService:
-          type: web
-          name: youpi-checkout
-          property: host
+        value: https://youpi-checkout.onrender.com
       - key: ADMIN_BASIC_AUTH_USER
         value: admin
       - key: ADMIN_BASIC_AUTH_PASS
@@ -120,12 +104,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: BASE_PAYMENT_API_URL
-        fromService:
-          type: web
-          name: youpi-payment-api
-          property: host
+        value: https://youpi-payment-api.onrender.com
       - key: BASE_CHECKOUT_URL
-        fromService:
-          type: web
-          name: youpi-checkout
-          property: host
+        value: https://youpi-checkout.onrender.com
